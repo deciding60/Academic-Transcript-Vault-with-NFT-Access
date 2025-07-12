@@ -3,6 +3,7 @@
 (define-constant ERR-TRANSCRIPT-EXISTS (err u102))
 (define-constant ERR-NO-TRANSCRIPT (err u103))
 (define-constant ERR-EXPIRED (err u104))
+(define-constant ERR-NO-METADATA (err u105))
 
 (define-non-fungible-token access-key uint)
 
@@ -25,12 +26,30 @@
     }
 )
 
+(define-map transcript-metadata
+    { student-id: (string-ascii 64) }
+    {
+        gpa: (optional uint),
+        graduation-year: (optional uint),
+        degree-type: (optional (string-ascii 64)),
+        honors: (optional (string-ascii 128)),
+        total-credits: (optional uint),
+    }
+)
+
 (define-data-var next-key-id uint u1)
 
 (define-read-only (get-transcript (student-id (string-ascii 64)))
     (match (map-get? transcripts { student-id: student-id })
         transcript (ok transcript)
         (err ERR-NO-TRANSCRIPT)
+    )
+)
+
+(define-read-only (get-transcript-metadata (student-id (string-ascii 64)))
+    (match (map-get? transcript-metadata { student-id: student-id })
+        metadata (ok metadata)
+        (err ERR-NO-METADATA)
     )
 )
 
@@ -104,5 +123,41 @@
         (asserts! (is-eq tx-sender contract-caller) ERR-NOT-AUTHORIZED)
         (try! (nft-burn? access-key key-id tx-sender))
         (ok (map-delete access-grants { key-id: key-id }))
+    )
+)
+
+(define-public (update-transcript-metadata
+        (student-id (string-ascii 64))
+        (gpa (optional uint))
+        (graduation-year (optional uint))
+        (degree-type (optional (string-ascii 64)))
+        (honors (optional (string-ascii 128)))
+        (total-credits (optional uint))
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-caller) ERR-NOT-AUTHORIZED)
+        (asserts! (is-some (map-get? transcripts { student-id: student-id }))
+            ERR-NO-TRANSCRIPT
+        )
+        (ok (map-set transcript-metadata { student-id: student-id } {
+            gpa: gpa,
+            graduation-year: graduation-year,
+            degree-type: degree-type,
+            honors: honors,
+            total-credits: total-credits,
+        }))
+    )
+)
+
+(define-public (query-students-by-gpa
+        (min-gpa uint)
+        (max-gpa uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-caller) ERR-NOT-AUTHORIZED)
+        (ok {
+            min-gpa: min-gpa,
+            max-gpa: max-gpa,
+        })
     )
 )
