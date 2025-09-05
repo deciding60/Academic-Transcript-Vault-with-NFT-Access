@@ -4,6 +4,9 @@
 (define-constant ERR-NO-TRANSCRIPT (err u103))
 (define-constant ERR-EXPIRED (err u104))
 (define-constant ERR-NO-METADATA (err u105))
+(define-constant ERR-INSTITUTION-NOT-REGISTERED (err u106))
+(define-constant ERR-ALREADY-VERIFIED-BY-INSTITUTION (err u107))
+(define-constant ERR-INSUFFICIENT-VERIFICATIONS (err u108))
 
 (define-non-fungible-token access-key uint)
 
@@ -37,6 +40,39 @@
     }
 )
 
+(define-map registered-institutions
+    { institution-id: (string-ascii 64) }
+    {
+        name: (string-ascii 128),
+        principal-address: principal,
+        verification-weight: uint,
+        active: bool,
+    }
+)
+
+(define-map institutional-verifications
+    {
+        student-id: (string-ascii 64),
+        institution-id: (string-ascii 64),
+    }
+    {
+        verifier-principal: principal,
+        signature-hash: (buff 32),
+        timestamp: uint,
+        verification-level: uint,
+    }
+)
+
+(define-map verification-summary
+    { student-id: (string-ascii 64) }
+    {
+        total-weight: uint,
+        verification-count: uint,
+        last-verified: uint,
+        verification-status: (string-ascii 32),
+    }
+)
+
 (define-data-var next-key-id uint u1)
 
 (define-read-only (get-transcript (student-id (string-ascii 64)))
@@ -51,6 +87,28 @@
         metadata (ok metadata)
         (err ERR-NO-METADATA)
     )
+)
+
+(define-read-only (get-verification-summary (student-id (string-ascii 64)))
+    (match (map-get? verification-summary { student-id: student-id })
+        summary (ok summary)
+        (ok {
+            total-weight: u0,
+            verification-count: u0,
+            last-verified: u0,
+            verification-status: "unverified",
+        })
+    )
+)
+
+(define-read-only (get-institutional-verification
+        (student-id (string-ascii 64))
+        (institution-id (string-ascii 64))
+    )
+    (map-get? institutional-verifications {
+        student-id: student-id,
+        institution-id: institution-id,
+    })
 )
 
 (define-public (add-transcript
@@ -158,6 +216,120 @@
         (ok {
             min-gpa: min-gpa,
             max-gpa: max-gpa,
+        })
+    )
+)
+
+(define-public (register-institution
+        (institution-id (string-ascii 64))
+        (name (string-ascii 128))
+        (principal-address principal)
+        (verification-weight uint)
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-caller) ERR-NOT-AUTHORIZED)
+        (ok (map-set registered-institutions { institution-id: institution-id } {
+            name: name,
+            principal-address: principal-address,
+            verification-weight: verification-weight,
+            active: true,
+        }))
+    )
+)
+
+(define-public (institutional-verify-transcript
+        (student-id (string-ascii 64))
+        (institution-id (string-ascii 64))
+        (signature-hash (buff 32))
+        (verification-level uint)
+    )
+    (let (
+            (institution (unwrap!
+                (map-get? registered-institutions { institution-id: institution-id })
+                ERR-INSTITUTION-NOT-REGISTERED
+            ))
+            (existing-verification (map-get? institutional-verifications {
+                student-id: student-id,
+                institution-id: institution-id,
+            }))
+            (current-summary (default-to {
+                total-weight: u0,
+                verification-count: u0,
+                last-verified: u0,
+                verification-status: "unverified",
+            }
+                (map-get? verification-summary { student-id: student-id })
+            ))
+        )
+        (asserts! (is-some (map-get? transcripts { student-id: student-id }))
+            ERR-NO-TRANSCRIPT
+        )
+        (asserts! (get active institution) ERR-INSTITUTION-NOT-REGISTERED)
+        (asserts! (is-eq tx-sender (get principal-address institution))
+            ERR-NOT-AUTHORIZED
+        )
+        (asserts! (is-none existing-verification)
+            ERR-ALREADY-VERIFIED-BY-INSTITUTION
+        )
+
+        (map-set institutional-verifications {
+            student-id: student-id,
+            institution-id: institution-id,
+        } {
+            verifier-principal: tx-sender,
+            signature-hash: signature-hash,
+            timestamp: burn-block-height,
+            verification-level: verification-level,
+        })
+
+        (let (
+                (new-total-weight (+ (get total-weight current-summary)
+                    (get verification-weight institution)
+                ))
+                (new-count (+ (get verification-count current-summary) u1))
+            )
+            (map-set verification-summary { student-id: student-id } {
+                total-weight: new-total-weight,
+                verification-count: new-count,
+                last-verified: burn-block-height,
+                verification-status: (if (>= new-total-weight u100)
+                    "fully-verified"
+                    "partially-verified"
+                ),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (deactivate-institution (institution-id (string-ascii 64)))
+    (let ((institution (unwrap!
+            (map-get? registered-institutions { institution-id: institution-id })
+            ERR-INSTITUTION-NOT-REGISTERED
+        )))
+        (asserts! (is-eq tx-sender contract-caller) ERR-NOT-AUTHORIZED)
+        (ok (map-set registered-institutions { institution-id: institution-id }
+            (merge institution { active: false })
+        ))
+    )
+)
+
+(define-public (verify-transcript-integrity
+        (student-id (string-ascii 64))
+        (minimum-weight uint)
+    )
+    (let ((summary (unwrap! (map-get? verification-summary { student-id: student-id })
+            ERR-NO-TRANSCRIPT
+        )))
+        (asserts! (>= (get total-weight summary) minimum-weight)
+            ERR-INSUFFICIENT-VERIFICATIONS
+        )
+        (ok {
+            student-id: student-id,
+            total-verification-weight: (get total-weight summary),
+            verification-count: (get verification-count summary),
+            status: (get verification-status summary),
+            last-verified-at: (get last-verified summary),
         })
     )
 )
