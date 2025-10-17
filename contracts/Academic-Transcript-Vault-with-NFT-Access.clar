@@ -7,6 +7,10 @@
 (define-constant ERR-INSTITUTION-NOT-REGISTERED (err u106))
 (define-constant ERR-ALREADY-VERIFIED-BY-INSTITUTION (err u107))
 (define-constant ERR-INSUFFICIENT-VERIFICATIONS (err u108))
+(define-constant ERR-TRANSCRIPT-REVOKED (err u109))
+(define-constant ERR-NOT-REVOKED (err u110))
+(define-constant ERR-APPEAL-EXISTS (err u111))
+(define-constant ERR-NO-APPEAL (err u112))
 
 (define-non-fungible-token access-key uint)
 
@@ -73,6 +77,32 @@
     }
 )
 
+(define-map revocations
+    { student-id: (string-ascii 64) }
+    {
+        revoked-by: principal,
+        revoked-at: uint,
+        reason-code: (string-ascii 32),
+        reason-detail: (string-ascii 256),
+        is-permanent: bool,
+        evidence-hash: (buff 32),
+    }
+)
+
+(define-map revocation-appeals
+    { student-id: (string-ascii 64) }
+    {
+        appellant: principal,
+        appeal-timestamp: uint,
+        appeal-reason: (string-ascii 512),
+        supporting-evidence: (buff 32),
+        status: (string-ascii 32),
+        reviewed-by: (optional principal),
+        reviewed-at: (optional uint),
+        resolution-notes: (optional (string-ascii 256)),
+    }
+)
+
 (define-data-var next-key-id uint u1)
 
 (define-read-only (get-transcript (student-id (string-ascii 64)))
@@ -109,6 +139,18 @@
         student-id: student-id,
         institution-id: institution-id,
     })
+)
+
+(define-read-only (get-revocation-status (student-id (string-ascii 64)))
+    (map-get? revocations { student-id: student-id })
+)
+
+(define-read-only (get-appeal-status (student-id (string-ascii 64)))
+    (map-get? revocation-appeals { student-id: student-id })
+)
+
+(define-read-only (is-transcript-revoked (student-id (string-ascii 64)))
+    (is-some (map-get? revocations { student-id: student-id }))
 )
 
 (define-public (add-transcript
@@ -330,6 +372,112 @@
             verification-count: (get verification-count summary),
             status: (get verification-status summary),
             last-verified-at: (get last-verified summary),
+        })
+    )
+)
+
+(define-public (revoke-transcript
+        (student-id (string-ascii 64))
+        (reason-code (string-ascii 32))
+        (reason-detail (string-ascii 256))
+        (is-permanent bool)
+        (evidence-hash (buff 32))
+    )
+    (let ((transcript (map-get? transcripts { student-id: student-id })))
+        (asserts! (is-some transcript) ERR-NO-TRANSCRIPT)
+        (asserts! (is-eq tx-sender contract-caller) ERR-NOT-AUTHORIZED)
+        (asserts! (is-none (map-get? revocations { student-id: student-id }))
+            ERR-TRANSCRIPT-REVOKED
+        )
+        (ok (map-set revocations { student-id: student-id } {
+            revoked-by: tx-sender,
+            revoked-at: burn-block-height,
+            reason-code: reason-code,
+            reason-detail: reason-detail,
+            is-permanent: is-permanent,
+            evidence-hash: evidence-hash,
+        }))
+    )
+)
+
+(define-public (reinstate-transcript (student-id (string-ascii 64)))
+    (let ((revocation (unwrap! (map-get? revocations { student-id: student-id })
+            ERR-NOT-REVOKED
+        )))
+        (asserts! (is-eq tx-sender contract-caller) ERR-NOT-AUTHORIZED)
+        (asserts! (not (get is-permanent revocation)) ERR-TRANSCRIPT-REVOKED)
+        (ok (map-delete revocations { student-id: student-id }))
+    )
+)
+
+(define-public (submit-appeal
+        (student-id (string-ascii 64))
+        (appeal-reason (string-ascii 512))
+        (supporting-evidence (buff 32))
+    )
+    (begin
+        (asserts! (is-some (map-get? revocations { student-id: student-id }))
+            ERR-NOT-REVOKED
+        )
+        (asserts! (is-eq tx-sender contract-caller) ERR-NOT-AUTHORIZED)
+        (asserts!
+            (is-none (map-get? revocation-appeals { student-id: student-id }))
+            ERR-APPEAL-EXISTS
+        )
+        (ok (map-set revocation-appeals { student-id: student-id } {
+            appellant: tx-sender,
+            appeal-timestamp: burn-block-height,
+            appeal-reason: appeal-reason,
+            supporting-evidence: supporting-evidence,
+            status: "pending",
+            reviewed-by: none,
+            reviewed-at: none,
+            resolution-notes: none,
+        }))
+    )
+)
+
+(define-public (review-appeal
+        (student-id (string-ascii 64))
+        (approved bool)
+        (resolution-notes (string-ascii 256))
+    )
+    (let ((appeal (unwrap! (map-get? revocation-appeals { student-id: student-id })
+            ERR-NO-APPEAL
+        )))
+        (asserts! (is-eq tx-sender contract-caller) ERR-NOT-AUTHORIZED)
+        (map-set revocation-appeals { student-id: student-id }
+            (merge appeal {
+                status: (if approved
+                    "approved"
+                    "rejected"
+                ),
+                reviewed-by: (some tx-sender),
+                reviewed-at: (some burn-block-height),
+                resolution-notes: (some resolution-notes),
+            })
+        )
+        (if approved
+            (begin
+                (map-delete revocations { student-id: student-id })
+                (ok true)
+            )
+            (ok false)
+        )
+    )
+)
+
+(define-public (get-transcript-with-status (student-id (string-ascii 64)))
+    (let (
+            (transcript (unwrap! (map-get? transcripts { student-id: student-id })
+                ERR-NO-TRANSCRIPT
+            ))
+            (revocation (map-get? revocations { student-id: student-id }))
+        )
+        (ok {
+            transcript: transcript,
+            is-revoked: (is-some revocation),
+            revocation-info: revocation,
         })
     )
 )
